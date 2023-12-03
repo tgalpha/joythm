@@ -9,6 +9,16 @@ import pyjoycon.constants as pjc
 import win32api
 import win32con
 
+from joythm.config import Config
+
+
+def _press_lift_key():
+    win32api.keybd_event(Config.airKey, win32api.MapVirtualKey(Config.airKey, 0), 0, 0)
+
+
+def _release_air_key():
+    win32api.keybd_event(Config.airKey, win32api.MapVirtualKey(Config.airKey, 0), win32con.KEYEVENTF_KEYUP, 0)
+
 
 class JoyConState(enum.Enum):
     putDown = 0
@@ -18,23 +28,54 @@ class JoyConState(enum.Enum):
 
 
 class JoyCon(pj.JoyCon):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = f'Joy-Con ({"L" if self.is_left() else "R"}) {self.serial}'
+        self.state = JoyConState.putDown
+
     def report_battery_level(self):
-        name = f'Joy-Con ({"L" if self.is_left() else "R"}) {self.serial}'
-        print(f'Battery level of {name}:', self.get_battery_level())
+        print(f'[{self.name}] Battery level:', self.get_battery_level())
+
+    def get_state_report_str(self):
+        return f'[{self.name}] State: {self.state.name}'
+
+    def start_monitoring(self):
+        self.register_update_hook(self._on_update)
+
+    def _on_update(self, *args):
+        def _get_current_state() -> JoyConState:
+            accel_x = self.get_accel_x()
+            gyro_y = self.get_gyro_y()
+
+            # The value of gyro_y is reversed on the L/R joy-con
+            if self.is_left():
+                if gyro_y > Config.gyroYThreshold:
+                    return JoyConState.swingDown
+                if gyro_y < -Config.gyroYThreshold:
+                    return JoyConState.swingUp
+            else:
+                if gyro_y > Config.gyroYThreshold:
+                    return JoyConState.swingUp
+                if gyro_y < -Config.gyroYThreshold:
+                    return JoyConState.swingDown
+            if accel_x > Config.accelXThreshold:
+                return JoyConState.holdAir
+            else:
+                return JoyConState.putDown
+
+        self.state = _get_current_state()
+        if self.state == JoyConState.swingDown:
+            _release_air_key()
+        elif self.state == JoyConState.swingUp or self.state == JoyConState.holdAir:
+            _press_lift_key()
+        else:
+            _release_air_key()
 
 
 class Worker:
     def __init__(self):
         self.joyCons: list[JoyCon] = []
         self.lastValue = {}
-        self.dirty = False
-
-        # TODO: Move configuration out of source code?
-        # region Config
-        self.accelXThreshold = 2500
-        self.gyroYThreshold = 2000
-        self.airKey = win32con.VK_SPACE
-        # endregion Config
 
     def main(self):
         try:
@@ -43,11 +84,12 @@ class Worker:
         except KeyboardInterrupt:
             print('\n== Exit ==')
             self._report_battery_info()
-            # self._disconnect()
+            self._disconnect()
 
     def _connect_joy_con(self):
         def _l_r_jc_connected(_ids):
-            return any((_id[1] == pjc.JOYCON_L_PRODUCT_ID for _id in _ids)) and any((_id[1] == pjc.JOYCON_R_PRODUCT_ID for _id in _ids))
+            return any((_id[1] == pjc.JOYCON_L_PRODUCT_ID for _id in _ids)) \
+                and any((_id[1] == pjc.JOYCON_R_PRODUCT_ID for _id in _ids))
 
         ids = []
         while not _l_r_jc_connected(ids):
@@ -58,58 +100,14 @@ class Worker:
         self.joyCons = [JoyCon(*jc_id) for jc_id in ids]
 
     def _monitor(self):
-        def _get_current_state(_joy_con: pj.JoyCon) -> JoyConState:
-            accel_x = _joy_con.get_accel_x()
-            gyro_y = _joy_con.get_gyro_y()
-            if self.lastValue.get(_joy_con.serial, None) != accel_x:
-                self.lastValue[_joy_con.serial] = accel_x
-                self.dirty = True
-
-            # The value of gyro_y is reversed on the L/R joy-con
-            if _joy_con.is_left():
-                if gyro_y > self.gyroYThreshold:
-                    return JoyConState.swingDown
-                if gyro_y < -self.gyroYThreshold:
-                    return JoyConState.swingUp
-            else:
-                if gyro_y > self.gyroYThreshold:
-                    return JoyConState.swingUp
-                if gyro_y < -self.gyroYThreshold:
-                    return JoyConState.swingDown
-            if accel_x > self.accelXThreshold:
-                return JoyConState.holdAir
-            else:
-                return JoyConState.putDown
+        def _print_jc_state():
+            print('\r' + ' '.join([jc.get_state_report_str() for jc in self.joyCons]), end='', flush=True)
 
         print('Start monitoring')
+        [jc.start_monitoring() for jc in self.joyCons]
         while True:
-            states = [_get_current_state(jc) for jc in self.joyCons]
-            self._process_joy_con_states(states)
-
-    def _process_joy_con_states(self, states: list[JoyConState]):
-        def _press_lift_key():
-            win32api.keybd_event(self.airKey, win32api.MapVirtualKey(self.airKey, 0), 0, 0)
-            time.sleep(0.005)
-
-        def _release_air_key():
-            win32api.keybd_event(self.airKey, win32api.MapVirtualKey(self.airKey, 0), win32con.KEYEVENTF_KEYUP, 0)
-            time.sleep(0.005)
-
-        def _exist_state(_states, excepted):
-            return any((state == excepted for state in _states))
-
-        # avoid keyboard spamming
-        if not self.dirty:
-            return
-
-        if _exist_state(states, JoyConState.swingDown):
-            _release_air_key()
-        if _exist_state(states, JoyConState.swingUp) or _exist_state(states, JoyConState.holdAir):
-            _press_lift_key()
-        _release_air_key()
-
-        self.dirty = False
-        print('\rCurrent state: ' + ' '.join([s.name for s in states]), flush=True, end='')
+            _print_jc_state()
+            time.sleep(1/144)
 
     def _report_battery_info(self):
         [jc.report_battery_level() for jc in self.joyCons]
