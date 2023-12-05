@@ -1,9 +1,11 @@
 import enum
 import time
+import threading
 
 # Must import this first to load embedded hidapi
 from joythm import hidapi
 
+import hid
 import pyjoycon as pj
 import pyjoycon.constants as pjc
 import win32api
@@ -33,13 +35,19 @@ class JoyCon(pj.JoyCon):
         self.name = f'Joy-Con ({"L" if self.is_left() else "R"}) {self.serial}'
         self.state = JoyConState.putDown
 
+    def is_alive(self):
+        return self._update_input_report_thread.is_alive()
+
     def report_battery_level(self):
-        print(f'[{self.name}] Battery level:', self.get_battery_level())
+        print(f'[{self.name}] Battery level: ', self.get_battery_level())
 
     def get_state_report_str(self):
-        return f'[{self.name}] State: {self.state.name}'
+        is_alive = self.is_alive()
+        return f'[{self.name} ({is_alive=})] State: {self.state.name}'
 
     def start_monitoring(self):
+        if self._on_update in self._input_hooks:
+            return
         self.register_update_hook(self._on_update)
 
     def _on_update(self, *args):
@@ -76,44 +84,59 @@ class Worker:
     def __init__(self):
         self.joyCons: list[JoyCon] = []
         self.lastValue = {}
+        self.scanJoyConThread = None
 
     def main(self):
         try:
-            self._connect_joy_con()
-            self._monitor()
+            while True:
+                self.monitor()
+                time.sleep(1 / 144)
         except KeyboardInterrupt:
             print('\n== Exit ==')
+            self._clear_inactive_joy_cons()
             self._report_battery_info()
             self._disconnect()
 
-    def _connect_joy_con(self):
-        def _l_r_jc_connected(_ids):
-            return any((_id[1] == pjc.JOYCON_L_PRODUCT_ID for _id in _ids)) \
-                and any((_id[1] == pjc.JOYCON_R_PRODUCT_ID for _id in _ids))
+    def monitor(self):
+        if any((not jc.is_alive() for jc in self.joyCons)) or len(self.joyCons) < 2:
+            self._rescan_joy_cons_on_the_fly()
 
-        ids = []
-        while not _l_r_jc_connected(ids):
-            print('Scanning for a pair of L&R Joy-Cons')
-            time.sleep(0.5)
-            ids = pj.get_device_ids()
-            print(f'Found {ids}')
-        self.joyCons = [JoyCon(*jc_id) for jc_id in ids]
+        print('\r' + ' '.join([jc.get_state_report_str() for jc in self.joyCons]), end='', flush=True)
 
-    def _monitor(self):
-        def _print_jc_state():
-            print('\r' + ' '.join([jc.get_state_report_str() for jc in self.joyCons]), end='', flush=True)
+    def _rescan_joy_cons_on_the_fly(self):
+        def _scan_joy_con():
+            def _l_r_jc_connected(_ids):
+                return any((_id[1] == pjc.JOYCON_L_PRODUCT_ID for _id in _ids)) \
+                    and any((_id[1] == pjc.JOYCON_R_PRODUCT_ID for _id in _ids))
 
-        print('Start monitoring')
-        [jc.start_monitoring() for jc in self.joyCons]
-        while True:
-            _print_jc_state()
-            time.sleep(1/144)
+            ids = []
+            while not _l_r_jc_connected(ids):
+                print('Scanning for a pair of L&R Joy-Cons')
+                time.sleep(0.5)
+                ids = pj.get_device_ids()
+                print(f'Found {ids}')
+
+            self._clear_inactive_joy_cons()
+            registered_jc_serials = {jc.serial for jc in self.joyCons}
+            unregistered_jcs = [jc_id for jc_id in ids if jc_id[2] not in registered_jc_serials]
+            self.joyCons.extend([JoyCon(*jc_id) for jc_id in unregistered_jcs])
+            [jc.start_monitoring() for jc in self.joyCons]
+
+        if self.scanJoyConThread is not None and self.scanJoyConThread.is_alive():
+            return
+        self.scanJoyConThread = threading.Thread(target=_scan_joy_con)
+        self.scanJoyConThread.daemon = True
+        self.scanJoyConThread.start()
+
+    def _clear_inactive_joy_cons(self):
+        self.joyCons = [jc for jc in self.joyCons if jc.is_alive()]
 
     def _report_battery_info(self):
         [jc.report_battery_level() for jc in self.joyCons]
 
     def _disconnect(self):
-        [jc.disconnect_device() for jc in self.joyCons]
+        if Config.disconnectJoyConAtExit:
+            [jc.disconnect_device() for jc in self.joyCons]
 
 
 if __name__ == '__main__':
