@@ -139,6 +139,10 @@ class Worker:
             [jc.disconnect_device() for jc in self.joyCons]
 
 
-if __name__ == '__main__':
+def main():
     worker = Worker()
     worker.main()
+
+
+if __name__ == '__main__':
+    main()

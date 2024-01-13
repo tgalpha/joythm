@@ -1,9 +1,8 @@
 [tool.poetry]
-name = "joycon-io-playground"
+name = "joythm"
 version = "0.1.0"
 description = ""
 authors = ["tgalpha <tanalpha.zhy@gmail.com>"]
-readme = "README.md"
 packages = [
     { include = "joythm", from = "src" }
 ]
@@ -21,6 +20,11 @@ pyglm = "^2.7.1"
 
 [tool.poetry.group.dev.dependencies]
 matplotlib = "^3.8.2"
+
+
+[tool.poetry.scripts]
+joythm = "joythm.core:main"
+
 
 [build-system]
 requires = ["poetry-core"]
